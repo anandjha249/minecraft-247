@@ -5,7 +5,7 @@
  * It combines:
  *   • A tiny Express HTTP server with two routes:
  *       GET /      → "Minecraft bot is alive."
- *       GET /ping  → "pong"
+ *       GET /ping  → "ping the status"
  *     These endpoints can be hit by UptimeRobot or any cron‑style pinger every
  *     few minutes so Render keeps the container awake.
  *   • A Mineflayer bot that logs in to **your** Java‑edition server and does
