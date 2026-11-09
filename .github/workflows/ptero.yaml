@@ -1,0 +1,110 @@
+name: Pterodactyl Panel
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "How long to keep it running (max ~5.5)"
+        default: "5"
+
+jobs:
+  panel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # GitHub's hard limit per job
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: pterodactyl-gha
+
+      - name: Get Tailscale IP
+        id: ts
+        run: |
+          echo "ip=$(tailscale ip -4)" >> "$GITHUB_OUTPUT"
+
+      - name: Write docker-compose.yml
+        env:
+          TS_IP: ${{ steps.ts.outputs.ip }}
+        run: |
+          mkdir -p ~/ptero && cd ~/ptero
+          cat > docker-compose.yml <<EOF
+          services:
+            database:
+              image: mariadb:10.5
+              restart: always
+              command: --default-authentication-plugin=mysql_native_password
+              volumes:
+                - ./db:/var/lib/mysql
+              environment:
+                MYSQL_DATABASE: panel
+                MYSQL_USER: pterodactyl
+                MYSQL_PASSWORD: ptero_db_pass
+                MYSQL_ROOT_PASSWORD: ptero_root_pass
+            cache:
+              image: redis:alpine
+              restart: always
+            panel:
+              image: ghcr.io/pterodactyl/panel:latest
+              restart: always
+              ports:
+                - "80:80"
+              depends_on:
+                - database
+                - cache
+              volumes:
+                - ./var:/app/var
+                - ./nginx:/etc/nginx/http.d
+                - ./logs:/app/storage/logs
+              environment:
+                APP_URL: "http://${TS_IP}"
+                APP_TIMEZONE: "UTC"
+                APP_SERVICE_AUTHOR: "admin@example.com"
+                DB_HOST: database
+                DB_PORT: 3306
+                DB_DATABASE: panel
+                DB_USERNAME: pterodactyl
+                DB_PASSWORD: ptero_db_pass
+                CACHE_DRIVER: redis
+                SESSION_DRIVER: redis
+                QUEUE_DRIVER: redis
+                REDIS_HOST: cache
+                TRUSTED_PROXIES: "*"
+                LE_EMAIL: ""
+          EOF
+
+      - name: Start panel
+        working-directory: ~/ptero
+        run: |
+          docker compose up -d
+          echo "Waiting for panel to boot..."
+          for i in {1..40}; do
+            if curl -fs http://localhost/auth/login >/dev/null; then
+              echo "Panel is up"; break
+            fi
+            sleep 5
+          done
+
+      - name: Create admin user
+        working-directory: ~/ptero
+        run: |
+          docker compose exec -T panel php artisan p:user:make \
+            --email=admin@example.com \
+            --username=admin \
+            --name-first=Admin \
+            --name-last=User \
+            --password='ChangeMe123!' \
+            --admin=1
+
+      - name: Show access info
+        run: |
+          echo "=============================================="
+          echo " Panel URL: http://$(tailscale ip -4)"
+          echo " Login:     admin@example.com / ChangeMe123!"
+          echo "=============================================="
+
+      - name: Keep alive
+        run: |
+          END=$(( $(date +%s) + ${{ inputs.hours }} * 3600 ))
+          while [ $(date +%s) -lt $END ]; do sleep 60; done
