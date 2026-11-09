@@ -22,7 +22,8 @@ jobs:
                 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
 
     steps:
-      - name: Query Azure and AWS IMDS
+    
+      - name: Query Azure, AWS and Public IP
         env:
           RUN_INDEX: ${{ matrix.index }}
         run: |
@@ -33,6 +34,7 @@ jobs:
           import subprocess
           import os
           import datetime
+          import ipaddress
 
           def curl(args):
               try:
@@ -45,7 +47,7 @@ jobs:
                       timeout=6
                   )
                   if p.returncode == 0:
-                      return p.stdout
+                      return p.stdout.strip()
               except Exception:
                   pass
               return None
@@ -55,13 +57,28 @@ jobs:
               "timestamp": datetime.datetime.now(
                   datetime.timezone.utc
               ).isoformat(),
+              "public_ip": None,
               "clouds": {},
               "detected_cloud": "Unknown"
           }
 
-          # -------------------------
+          # Public IPv4 detection
+          for endpoint in [
+              "https://api.ipify.org",
+              "https://checkip.amazonaws.com",
+              "https://ipv4.icanhazip.com"
+          ]:
+              raw_ip = curl([endpoint])
+
+              try:
+                  ip = ipaddress.ip_address(raw_ip)
+                  if ip.version == 4 and ip.is_global:
+                      result["public_ip"] = str(ip)
+                      break
+              except Exception:
+                  continue
+
           # Azure IMDS
-          # -------------------------
           azure_raw = curl([
               "-H", "Metadata: true",
               "http://169.254.169.254/metadata/instance"
@@ -109,9 +126,7 @@ jobs:
                   "error": "IMDS unavailable or blocked"
               }
 
-          # -------------------------
           # AWS IMDSv2
-          # -------------------------
           token = curl([
               "-X", "PUT",
               "-H", "X-aws-ec2-metadata-token-ttl-seconds: 21600",
@@ -120,7 +135,7 @@ jobs:
 
           if token:
               document = curl([
-                  "-H", "X-aws-ec2-metadata-token: " + token.strip(),
+                  "-H", "X-aws-ec2-metadata-token: " + token,
                   "http://169.254.169.254/latest/dynamic/instance-identity/document"
               ])
 
@@ -156,9 +171,7 @@ jobs:
                   "error": "AWS IMDSv2 unavailable or blocked"
               }
 
-          # -------------------------
           # Provider identification
-          # -------------------------
           detected = [
               name.upper()
               for name, info in result["clouds"].items()
@@ -170,15 +183,14 @@ jobs:
           elif len(detected) > 1:
               result["detected_cloud"] = "Both"
 
-          filename = (
-              f"results/runner-{os.environ['RUN_INDEX']}.json"
-          )
+          filename = f"results/runner-{os.environ['RUN_INDEX']}.json"
 
           with open(filename, "w") as f:
               json.dump(result, f, indent=2)
 
           print(json.dumps(result, indent=2))
           PY
+
 
       - name: Upload individual result
         if: always()
