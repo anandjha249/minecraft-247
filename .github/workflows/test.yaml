@@ -1,7 +1,8 @@
+```yaml
 name: Cloud Provider IMDS Check
 
 on:
-  workflow_dispatch: # Adds the manual "Run workflow" button in the GitHub UI
+  workflow_dispatch:
 
 jobs:
   check-cloud:
@@ -9,6 +10,7 @@ jobs:
 
     steps:
       - name: Run Cloud Discovery Script
+        shell: bash
         run: |
           cat << 'EOF' > test_imds.sh
           #!/usr/bin/env bash
@@ -20,32 +22,61 @@ jobs:
               url="$2"
               shift 2
 
-              echo -n "[$name] "
+              echo ""
+              echo "=========================================="
+              echo "Testing: $name"
+              echo "Endpoint: $url"
+              echo "=========================================="
 
-              # Execute curl and capture output
-              output=$(curl -sS -o /dev/null \
+              body=$(mktemp)
+
+              result=$(curl -sS \
                   --connect-timeout 3 \
                   --max-time 3 \
-                  -w "HTTP %{http_code} | IP %{remote_ip} | Time %{time_total}s" \
+                  --noproxy '*' \
+                  -o "$body" \
+                  -w "%{http_code}|%{remote_ip}|%{time_total}" \
                   "$@" "$url" 2>&1)
-              
+
               exit_code=$?
-              
-              if [ $exit_code -ne 0 ]; then
-                  echo "FAIL -> Unreachable / blocked / timed out (Error: $output)"
+
+              if [ $exit_code -eq 0 ]; then
+                  http_code=$(echo "$result" | cut -d'|' -f1)
+                  remote_ip=$(echo "$result" | cut -d'|' -f2)
+                  duration=$(echo "$result" | cut -d'|' -f3)
+
+                  if [ "$http_code" = "200" ]; then
+                      echo "STATUS: SUCCESS"
+                      echo "HTTP: $http_code"
+                      echo "IP: $remote_ip"
+                      echo "TIME: ${duration}s"
+                      echo ""
+                      echo "---------- METADATA BEGIN ----------"
+                      cat "$body"
+                      echo ""
+                      echo "----------- METADATA END -----------"
+                  else
+                      echo "STATUS: HTTP $http_code"
+                      echo "Response: $(cat "$body")"
+                  fi
               else
-                  echo "SUCCESS -> $output"
+                  echo "STATUS: FAILED"
+                  echo "Error: $result"
               fi
+
+              rm -f "$body"
           }
 
-          echo "=== Cloud IMDS Connectivity Tests ==="
+          echo "=========================================="
+          echo " CLOUD PROVIDER IMDS DISCOVERY"
+          echo "=========================================="
 
           # AWS
           test_endpoint "AWS EC2" \
             "http://169.254.169.254/latest/meta-data/"
 
           # Microsoft Azure
-          test_endpoint "Azure" \
+          test_endpoint "Microsoft Azure" \
             "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
             -H "Metadata: true"
 
@@ -54,7 +85,7 @@ jobs:
             "http://metadata.google.internal/computeMetadata/v1/" \
             -H "Metadata-Flavor: Google"
 
-          # Oracle Cloud Infrastructure
+          # Oracle Cloud
           test_endpoint "Oracle Cloud" \
             "http://169.254.169.254/opc/v2/instance/" \
             -H "Authorization: Bearer Oracle"
@@ -76,12 +107,15 @@ jobs:
             "http://169.254.169.254/metadata/v1/"
 
           # Hetzner Cloud
-          test_endpoint "Hetzner" \
+          test_endpoint "Hetzner Cloud" \
             "http://169.254.169.254/hetzner/v1/metadata"
 
-          echo "=== Tests Complete ==="
+          echo ""
+          echo "=========================================="
+          echo " ALL TESTS COMPLETED"
+          echo "=========================================="
           EOF
 
-          # Make script executable and run it
           chmod +x test_imds.sh
           ./test_imds.sh
+```
