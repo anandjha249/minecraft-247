@@ -7,10 +7,13 @@ on:
         description: "How long to keep it running (max ~5.5)"
         default: "5"
 
+env:
+  PTERO_DIR: /home/runner/ptero
+
 jobs:
   panel:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # GitHub's hard limit per job
+    timeout-minutes: 360
 
     steps:
       - name: Connect to Tailscale
@@ -28,7 +31,8 @@ jobs:
         env:
           TS_IP: ${{ steps.ts.outputs.ip }}
         run: |
-          mkdir -p ~/ptero && cd ~/ptero
+          mkdir -p "$PTERO_DIR"
+          cd "$PTERO_DIR"
           cat > docker-compose.yml <<EOF
           services:
             database:
@@ -75,7 +79,7 @@ jobs:
           EOF
 
       - name: Start panel
-        working-directory: ~/ptero
+        working-directory: /home/runner/ptero
         run: |
           docker compose up -d
           echo "Waiting for panel to boot..."
@@ -87,7 +91,7 @@ jobs:
           done
 
       - name: Create admin user
-        working-directory: ~/ptero
+        working-directory: /home/runner/ptero
         run: |
           docker compose exec -T panel php artisan p:user:make \
             --email=admin@example.com \
