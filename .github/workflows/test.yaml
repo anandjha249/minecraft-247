@@ -1,0 +1,87 @@
+name: Cloud Provider IMDS Check
+
+on:
+  workflow_dispatch: # Adds the manual "Run workflow" button in the GitHub UI
+
+jobs:
+  check-cloud:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run Cloud Discovery Script
+        run: |
+          cat << 'EOF' > test_imds.sh
+          #!/usr/bin/env bash
+
+          set +e
+
+          test_endpoint() {
+              name="$1"
+              url="$2"
+              shift 2
+
+              echo -n "[$name] "
+
+              # Execute curl and capture output
+              output=$(curl -sS -o /dev/null \
+                  --connect-timeout 3 \
+                  --max-time 3 \
+                  -w "HTTP %{http_code} | IP %{remote_ip} | Time %{time_total}s" \
+                  "$@" "$url" 2>&1)
+              
+              exit_code=$?
+              
+              if [ $exit_code -ne 0 ]; then
+                  echo "FAIL -> Unreachable / blocked / timed out (Error: $output)"
+              else
+                  echo "SUCCESS -> $output"
+              fi
+          }
+
+          echo "=== Cloud IMDS Connectivity Tests ==="
+
+          # AWS
+          test_endpoint "AWS EC2" \
+            "http://169.254.169.254/latest/meta-data/"
+
+          # Microsoft Azure
+          test_endpoint "Azure" \
+            "http://169.254.169.254/metadata/instance?api-version=2021-02-01" \
+            -H "Metadata: true"
+
+          # Google Cloud
+          test_endpoint "Google Cloud" \
+            "http://metadata.google.internal/computeMetadata/v1/" \
+            -H "Metadata-Flavor: Google"
+
+          # Oracle Cloud Infrastructure
+          test_endpoint "Oracle Cloud" \
+            "http://169.254.169.254/opc/v2/instance/" \
+            -H "Authorization: Bearer Oracle"
+
+          # Alibaba Cloud
+          test_endpoint "Alibaba Cloud" \
+            "http://100.100.100.200/latest/meta-data/"
+
+          # Tencent Cloud
+          test_endpoint "Tencent Cloud" \
+            "http://metadata.tencentyun.com/latest/meta-data/"
+
+          # IBM Cloud
+          test_endpoint "IBM Cloud" \
+            "http://169.254.169.254/metadata/v1/instance"
+
+          # DigitalOcean
+          test_endpoint "DigitalOcean" \
+            "http://169.254.169.254/metadata/v1/"
+
+          # Hetzner Cloud
+          test_endpoint "Hetzner" \
+            "http://169.254.169.254/hetzner/v1/metadata"
+
+          echo "=== Tests Complete ==="
+          EOF
+
+          # Make script executable and run it
+          chmod +x test_imds.sh
+          ./test_imds.sh
