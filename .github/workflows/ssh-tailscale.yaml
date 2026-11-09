@@ -1,0 +1,66 @@
+name: Zero-Secret Tailscale SSH Session
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ssh-debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup SSH Server, User, & Password
+        run: |
+          sudo apt-get update && sudo apt-get install -y openssh-server
+          
+          # Set a random password for the 'runner' user
+          RUNNER_PASS=$(openssl rand -base64 12)
+          echo "runner:$RUNNER_PASS" | sudo chpasswd
+          
+          # Enable standard password authentication for SSH
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+          
+          # Save password to access in the next step
+          echo "RUNNER_PASS=$RUNNER_PASS" >> $GITHUB_ENV
+
+      - name: Install & Launch Tailscale Interactively
+        run: |
+          # Install official Tailscale client
+          curl -fsSL https://tailscale.com | sh
+          
+          echo "=========================================================="
+          echo "🔑 STEP 1: CLICK THE LINK BELOW TO AUTHORIZE THE VM"
+          echo "=========================================================="
+          
+          # Start tailscale up in the background and pipe output so the link prints out
+          sudo tailscale up --hostname=github-runner-debug &
+          
+          # Give Tailscale a few seconds to generate the login link
+          sleep 5
+          
+          echo ""
+          echo "=========================================================="
+          echo "👤 STEP 2: SSH CONNECTION DETAILS (Once authorized)"
+          echo "=========================================================="
+          echo " Username: runner"
+          echo " Password: ${{ env.RUNNER_PASS }}"
+          
+          # Loop checking for Tailscale IP up to 3 minutes
+          for i in {1..36}; do
+            TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
+            if [ ! -z "$TAILSCALE_IP" ]; then
+               echo "✅ Connected to Tailnet successfully!"
+               echo "💻 SSH Command: ssh runner@$TAILSCALE_IP"
+               echo "=========================================================="
+               break
+            fi
+            if [ $i -eq 36 ]; then
+               echo "❌ Timeout waiting for you to click the link."
+               exit 1
+            fi
+            sleep 5
+          done
+
+          echo "⏳ Session active. Keeping VM alive for 30 minutes..."
+          sleep 1800
