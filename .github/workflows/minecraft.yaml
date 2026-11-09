@@ -1,0 +1,159 @@
+name: Minecraft Paper Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      mc_version:
+        description: "Minecraft version (Paper)"
+        default: "26.2"
+        required: true
+      ram:
+        description: "Server RAM (GB)"
+        default: "12"
+        required: true
+      run_minutes:
+        description: "Minutes to keep the server up (max ~340)"
+        default: "330"
+        required: true
+      auto_restart:
+        description: "Re-trigger this workflow when finished"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write # only needed for auto_restart
+
+concurrency:
+  group: minecraft-server
+  cancel-in-progress: false
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355 # hard cap is 360 for GitHub-hosted runners
+    env:
+      MC_VERSION: ${{ inputs.mc_version }}
+      RAM: ${{ inputs.ram }}
+      RUN_MINUTES: ${{ inputs.run_minutes }}
+
+    steps:
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # ---- Restore previous world/config (persistence between runs) ----
+      - name: Restore server data
+        uses: actions/cache/restore@v4
+        with:
+          path: server
+          key: mc-data-${{ github.run_id }}
+          restore-keys: |
+            mc-data-
+
+      - name: Download Paper ${{ inputs.mc_version }}
+        run: |
+          mkdir -p server && cd server
+          API="https://fill.papermc.io/v3/projects/paper/versions/${MC_VERSION}/builds/latest"
+          JSON=$(curl -fsSL -H "User-Agent: gh-actions-mc-server" "$API") \
+            || { echo "::error::Paper ${MC_VERSION} not found. Check it exists on https://papermc.io/downloads/paper"; exit 1; }
+          URL=$(echo "$JSON" | jq -r '.downloads."server:default".url')
+          SHA=$(echo "$JSON" | jq -r '.downloads."server:default".checksums.sha256')
+          curl -fsSL -o paper.jar "$URL"
+          echo "$SHA  paper.jar" | sha256sum -c -
+          echo "Downloaded build $(echo "$JSON" | jq -r '.id') for ${MC_VERSION}"
+
+      - name: Configure server
+        working-directory: server
+        run: |
+          echo "eula=true" > eula.txt
+          if [ ! -f server.properties ]; then
+            cat > server.properties <<EOF
+          motd=Paper ${MC_VERSION} on GitHub Actions
+          server-port=25565
+          online-mode=true
+          view-distance=8
+          simulation-distance=6
+          max-players=10
+          white-list=false
+          EOF
+          fi
+
+      # ---- Private networking via Tailscale ----
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: minecraft-server
+          # tags: tag:ci   # uncomment if your auth key is tag-scoped
+
+      - name: Show connection address
+        run: |
+          IP=$(tailscale ip -4)
+          echo "Connect with: ${IP}:25565  (or minecraft-server:25565 via MagicDNS)"
+          echo "### Minecraft server is up" >> "$GITHUB_STEP_SUMMARY"
+          echo "Address: \`${IP}:25565\` (or \`minecraft-server:25565\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run server
+        working-directory: server
+        run: |
+          mkfifo console || true
+          # keep the fifo open so the server never sees EOF on stdin
+          tail -f console | java -Xms${RAM}G -Xmx${RAM}G \
+            -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 \
+            -Dcom.mojang.eula.agree=true \
+            -jar paper.jar --nogui > server.log 2>&1 &
+          echo "Server booting..."
+          # stream the log while we wait
+          tail -n +1 -f server.log &
+          TAIL_PID=$!
+
+          sleep $((RUN_MINUTES * 60))
+
+          echo "Time's up - saving and stopping"
+          echo "say Server shutting down in 30s (GitHub runner limit)" > console
+          sleep 30
+          echo "save-all flush" > console
+          sleep 10
+          echo "stop" > console
+          # wait for java to exit
+          for i in $(seq 1 60); do
+            pgrep -f paper.jar >/dev/null || break
+            sleep 2
+          done
+          kill $TAIL_PID 2>/dev/null || true
+          pkill tail || true
+
+      # ---- Always save the world, even if something above failed ----
+      - name: Save server data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            server
+            !server/paper.jar
+            !server/cache
+            !server/logs
+          key: mc-data-${{ github.run_id }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs
+          path: |
+            server/server.log
+            server/logs
+          if-no-files-found: ignore
+
+      - name: Relaunch workflow
+        if: ${{ inputs.auto_restart && always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run "${{ github.workflow }}" \
+            --repo "${{ github.repository }}" \
+            -f mc_version="${MC_VERSION}" -f ram="${RAM}" \
+            -f run_minutes="${RUN_MINUTES}" -f auto_restart=true
