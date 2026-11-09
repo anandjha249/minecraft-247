@@ -1,0 +1,324 @@
+
+name: 40-Runner Cloud Metadata Survey
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+jobs:
+  probe:
+    name: Probe runner ${{ matrix.index }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 40
+      matrix:
+        index: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+                31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+
+    steps:
+      - name: Query Azure and AWS IMDS
+        env:
+          RUN_INDEX: ${{ matrix.index }}
+        run: |
+          mkdir -p results
+
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import os
+          import datetime
+
+          def curl(args):
+              try:
+                  p = subprocess.run(
+                      ["curl", "--noproxy", "*", "-fsS",
+                       "--connect-timeout", "2", "--max-time", "4"]
+                      + args,
+                      capture_output=True,
+                      text=True,
+                      timeout=6
+                  )
+                  if p.returncode == 0:
+                      return p.stdout
+              except Exception:
+                  pass
+              return None
+
+          result = {
+              "runner_index": int(os.environ["RUN_INDEX"]),
+              "timestamp": datetime.datetime.now(
+                  datetime.timezone.utc
+              ).isoformat(),
+              "clouds": {},
+              "detected_cloud": "Unknown"
+          }
+
+          # -------------------------
+          # Azure IMDS
+          # -------------------------
+          azure_raw = curl([
+              "-H", "Metadata: true",
+              "http://169.254.169.254/metadata/instance"
+              "?api-version=2021-02-01"
+          ])
+
+          if azure_raw:
+              try:
+                  data = json.loads(azure_raw)
+                  compute = data.get("compute", {})
+                  network = data.get("network", {})
+
+                  ips = []
+                  for interface in network.get("interface", []):
+                      for entry in interface.get(
+                          "ipv4", {}
+                      ).get("ipAddress", []):
+                          if entry.get("privateIpAddress"):
+                              ips.append(
+                                  entry["privateIpAddress"]
+                              )
+
+                  result["clouds"]["azure"] = {
+                      "detected": True,
+                      "region": compute.get("location"),
+                      "vm_size": compute.get("vmSize"),
+                      "vm_name": compute.get("name"),
+                      "vm_id": compute.get("vmId"),
+                      "os_type": compute.get("osType"),
+                      "zone": compute.get("zone"),
+                      "provider": compute.get("provider"),
+                      "resource_group": compute.get(
+                          "resourceGroupName"
+                      ),
+                      "private_ips": ips
+                  }
+              except Exception as e:
+                  result["clouds"]["azure"] = {
+                      "detected": False,
+                      "error": str(e)
+                  }
+          else:
+              result["clouds"]["azure"] = {
+                  "detected": False,
+                  "error": "IMDS unavailable or blocked"
+              }
+
+          # -------------------------
+          # AWS IMDSv2
+          # -------------------------
+          token = curl([
+              "-X", "PUT",
+              "-H", "X-aws-ec2-metadata-token-ttl-seconds: 21600",
+              "http://169.254.169.254/latest/api/token"
+          ])
+
+          if token:
+              document = curl([
+                  "-H", "X-aws-ec2-metadata-token: " + token.strip(),
+                  "http://169.254.169.254/latest/dynamic/instance-identity/document"
+              ])
+
+              if document:
+                  try:
+                      data = json.loads(document)
+
+                      result["clouds"]["aws"] = {
+                          "detected": True,
+                          "region": data.get("region"),
+                          "availability_zone": data.get(
+                              "availabilityZone"
+                          ),
+                          "instance_type": data.get("instanceType"),
+                          "instance_id": data.get("instanceId"),
+                          "account_id": data.get("accountId"),
+                          "image_id": data.get("imageId"),
+                          "architecture": data.get("architecture")
+                      }
+                  except Exception as e:
+                      result["clouds"]["aws"] = {
+                          "detected": False,
+                          "error": str(e)
+                      }
+              else:
+                  result["clouds"]["aws"] = {
+                      "detected": False,
+                      "error": "AWS identity document unavailable"
+                  }
+          else:
+              result["clouds"]["aws"] = {
+                  "detected": False,
+                  "error": "AWS IMDSv2 unavailable or blocked"
+              }
+
+          # -------------------------
+          # Provider identification
+          # -------------------------
+          detected = [
+              name.upper()
+              for name, info in result["clouds"].items()
+              if info.get("detected")
+          ]
+
+          if len(detected) == 1:
+              result["detected_cloud"] = detected[0]
+          elif len(detected) > 1:
+              result["detected_cloud"] = "Both"
+
+          filename = (
+              f"results/runner-{os.environ['RUN_INDEX']}.json"
+          )
+
+          with open(filename, "w") as f:
+              json.dump(result, f, indent=2)
+
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Upload individual result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-${{ matrix.index }}
+          path: results/runner-${{ matrix.index }}.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  aggregate:
+    name: Aggregate 40 runner results
+    needs: probe
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all runner results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runner-*
+          path: results
+          merge-multiple: true
+
+      - name: Generate statistics JSON
+        run: |
+          python3 - <<'PY'
+          import json
+          import glob
+          from collections import Counter
+          from datetime import datetime, timezone
+
+          files = glob.glob("results/*.json")
+          instances = []
+
+          for filename in files:
+              try:
+                  with open(filename) as f:
+                      instances.append(json.load(f))
+              except Exception as e:
+                  print("Invalid file:", filename, e)
+
+          clouds = Counter()
+          regions = Counter()
+          zones = Counter()
+          vm_sizes = Counter()
+          statuses = Counter()
+
+          for item in instances:
+              cloud = item.get("detected_cloud", "Unknown")
+              clouds[cloud] += 1
+
+              for provider in ("azure", "aws"):
+                  data = item.get("clouds", {}).get(
+                      provider, {}
+                  )
+
+                  if data.get("detected"):
+                      if data.get("region"):
+                          regions[
+                              f"{provider}:{data['region']}"
+                          ] += 1
+
+                      zone = (
+                          data.get("zone")
+                          or data.get("availability_zone")
+                      )
+
+                      if zone:
+                          zones[
+                              f"{provider}:{zone}"
+                          ] += 1
+
+                      size = (
+                          data.get("vm_size")
+                          or data.get("instance_type")
+                      )
+
+                      if size:
+                          vm_sizes[
+                              f"{provider}:{size}"
+                          ] += 1
+
+              statuses[
+                  "successful" if cloud != "Unknown"
+                  else "undetected"
+              ] += 1
+
+          report = {
+              "generated_at": datetime.now(
+                  timezone.utc
+              ).isoformat(),
+
+              "expected_jobs": 40,
+              "collected_results": len(instances),
+
+              "summary": {
+                  "cloud_distribution": dict(clouds),
+                  "region_distribution": dict(regions),
+                  "availability_zone_distribution": dict(zones),
+                  "vm_size_distribution": dict(vm_sizes),
+                  "detection_status": dict(statuses)
+              },
+
+              "instances": sorted(
+                  instances,
+                  key=lambda x: x.get("runner_index", 0)
+              )
+          }
+
+          with open("metadata-results.json", "w") as f:
+              json.dump(report, f, indent=2)
+
+          print(json.dumps(report["summary"], indent=2))
+          print("Saved metadata-results.json")
+          PY
+
+      - name: Upload consolidated JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-metadata-report
+          path: metadata-results.json
+          retention-days: 30
+
+      - name: Display summary
+        run: |
+          echo "## Cloud Metadata Survey" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+
+          with open("metadata-results.json") as f:
+              data = json.load(f)
+
+          print(f"Collected: {data['collected_results']}/40")
+          print()
+          print("### Distribution")
+          print()
+          print("| Metric | Results |")
+          print("|---|---|")
+
+          for key, values in data["summary"].items():
+              print(f"| {key} | `{json.dumps(values)}` |")
+          PY
