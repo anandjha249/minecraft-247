@@ -1,16 +1,16 @@
 name: Parallel Metadata Test
 
 on:
-  workflow_dispatch: # This enables the manual "Run workflow" button in the GitHub UI
+  workflow_dispatch: # Manual "Run workflow" button
 
 jobs:
   fetch-metadata:
     runs-on: ubuntu-latest
     
     strategy:
-      fail-fast: false # Ensures that if one machine fails, the other 5 keep running
+      fail-fast: false
       matrix:
-        runner_id: [1, 2, 3, 4, 5, 6] # Generates 6 separate jobs on 6 parallel VMs
+        runner_id: [1, 2, 3, 4, 5, 6]
 
     steps:
       - name: Checkout repository
@@ -21,14 +21,14 @@ jobs:
           echo "Running on Machine Matrix ID: ${{ matrix.runner_id }}"
           
           # Execute your curl + python formatting command and save it uniquely
-          curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance?api-version=2021-02-01" | python3 -m json.tool > runner${{ matrix.runner_id }}.json
+          curl -s -H "Metadata:true" "http://169.254.169" | python3 -m json.tool > runner${{ matrix.runner_id }}.json
           
-          # Print the output to the GitHub logs so you can see it without downloading the file
+          # Print the output to the GitHub logs
           echo "=== Content of runner${{ matrix.runner_id }}.json ==="
           cat runner${{ matrix.runner_id }}.json
 
       - name: Upload JSON File as an Artifact
-        uses: actions/artifacts/upload-artifact@v4
+        uses: actions/upload-artifact@v4  # Corrected Action reference
         with:
           name: runner${{ matrix.runner_id }}-metadata
           path: runner${{ matrix.runner_id }}.json
