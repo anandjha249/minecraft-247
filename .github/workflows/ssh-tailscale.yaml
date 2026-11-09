@@ -22,10 +22,10 @@ jobs:
           # Ensure runner account exists
           id runner
 
-          # Set SSH password from GitHub repository secret
+          # Use repo secret when provided, otherwise generate a one-time password
           if [ -z "$SSH_PASSWORD" ]; then
-            echo "::error::Set SSH_PASSWORD in repository secrets."
-            exit 1
+            SSH_PASSWORD="$(openssl rand -base64 24 | tr -d '\n')"
+            echo "::warning::SSH_PASSWORD secret not set. Generated one-time password for this run."
           fi
 
           echo "::add-mask::$SSH_PASSWORD"
