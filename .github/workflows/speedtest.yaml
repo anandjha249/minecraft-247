@@ -1,0 +1,201 @@
+
+name: Parallel Azure Runner Speedtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  speedtest:
+    name: Speedtest Runner ${{ matrix.runner }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        runner: [1, 2, 3, 4, 5]
+
+    steps:
+      - name: Install Ookla Speedtest CLI
+        run: |
+          set -e
+
+          curl -fL \
+            "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz" \
+            -o /tmp/speedtest.tgz
+
+          tar -xzf /tmp/speedtest.tgz -C /tmp speedtest
+
+          sudo install -m 755 /tmp/speedtest /usr/local/bin/speedtest
+
+          speedtest --version
+
+      - name: Run Speedtest
+        run: |
+          echo "=========================================="
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Target: AT&T San Diego (69098)"
+          echo "=========================================="
+
+          speedtest \
+            --server-id=69098 \
+            --accept-license \
+            --accept-gdpr \
+            -f json > speedtest-${{ matrix.runner }}.json
+
+          python3 -m json.tool speedtest-${{ matrix.runner }}.json
+
+      - name: Upload Speedtest Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedtest-${{ matrix.runner }}
+          path: speedtest-${{ matrix.runner }}.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  aggregate:
+    name: Aggregate All Results
+    runs-on: ubuntu-latest
+    needs: speedtest
+    if: always()
+    timeout-minutes: 5
+
+    steps:
+      - name: Download All Runner Results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: speedtest-*
+          path: results
+          merge-multiple: true
+
+      - name: Aggregate Results
+        run: |
+          python3 <<'PY'
+          import json
+          import glob
+          import os
+          import statistics
+
+          files = sorted(glob.glob("results/speedtest-*.json"))
+
+          results = []
+
+          print("\n========== INDIVIDUAL RESULTS ==========\n")
+
+          for file in files:
+              try:
+                  with open(file) as f:
+                      d = json.load(f)
+
+                  download = d["download"]["bandwidth"] * 8 / 1_000_000
+                  upload = d["upload"]["bandwidth"] * 8 / 1_000_000
+                  latency = d["ping"]["latency"]
+                  packet_loss = d.get("packetLoss")
+                  server = d["server"]["name"]
+                  isp = d.get("isp", "Unknown")
+                  url = d.get("result", {}).get("url", "")
+
+                  runner = os.path.basename(file).replace(
+                      "speedtest-", ""
+                  ).replace(".json", "")
+
+                  result = {
+                      "runner": runner,
+                      "download": download,
+                      "upload": upload,
+                      "latency": latency,
+                      "packet_loss": packet_loss,
+                      "server": server,
+                      "isp": isp,
+                      "url": url
+                  }
+
+                  results.append(result)
+
+                  print(
+                      f"Runner {runner}: "
+                      f"Download={download:.2f} Mbps | "
+                      f"Upload={upload:.2f} Mbps | "
+                      f"Latency={latency:.2f} ms"
+                  )
+
+              except Exception as e:
+                  print(f"Failed to parse {file}: {e}")
+
+          if not results:
+              raise SystemExit("No valid speedtest results found.")
+
+          downloads = [r["download"] for r in results]
+          uploads = [r["upload"] for r in results]
+          latencies = [r["latency"] for r in results]
+
+          print("\n========== AGGREGATE RESULTS ==========\n")
+          print(f"Successful runners : {len(results)}/5")
+          print(f"Average Download   : {statistics.mean(downloads):.2f} Mbps")
+          print(f"Average Upload     : {statistics.mean(uploads):.2f} Mbps")
+          print(f"Average Latency    : {statistics.mean(latencies):.2f} ms")
+          print(f"Minimum Download   : {min(downloads):.2f} Mbps")
+          print(f"Maximum Download   : {max(downloads):.2f} Mbps")
+          print(f"Minimum Upload     : {min(uploads):.2f} Mbps")
+          print(f"Maximum Upload     : {max(uploads):.2f} Mbps")
+
+          print("\n========== COMBINED THROUGHPUT ==========\n")
+          print(f"Combined Download  : {sum(downloads):.2f} Mbps")
+          print(f"Combined Upload    : {sum(uploads):.2f} Mbps")
+
+          # GitHub Actions summary
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("# Parallel Speedtest Results\n\n")
+              f.write("**Target:** AT&T San Diego (69098)\n\n")
+
+              f.write("| Runner | Download | Upload | Latency | Packet Loss | ISP |\n")
+              f.write("|---|---:|---:|---:|---:|---|\n")
+
+              for r in results:
+                  loss = (
+                      f"{r['packet_loss']}%"
+                      if r["packet_loss"] is not None
+                      else "N/A"
+                  )
+                  f.write(
+                      f"| {r['runner']} "
+                      f"| {r['download']:.2f} Mbps "
+                      f"| {r['upload']:.2f} Mbps "
+                      f"| {r['latency']:.2f} ms "
+                      f"| {loss} "
+                      f"| {r['isp']} |\n"
+                  )
+
+              f.write("\n## Aggregate Statistics\n\n")
+              f.write(f"- Successful runners: {len(results)}/5\n")
+              f.write(f"- Average download: {statistics.mean(downloads):.2f} Mbps\n")
+              f.write(f"- Average upload: {statistics.mean(uploads):.2f} Mbps\n")
+              f.write(f"- Average latency: {statistics.mean(latencies):.2f} ms\n")
+              f.write(f"- Combined download: {sum(downloads):.2f} Mbps\n")
+              f.write(f"- Combined upload: {sum(uploads):.2f} Mbps\n")
+
+              f.write("\n## Individual Test Links\n\n")
+              for r in results:
+                  if r["url"]:
+                      f.write(f"- Runner {r['runner']}: {r['url']}\n")
+
+          with open("aggregate-results.json", "w") as f:
+              json.dump(results, f, indent=2)
+
+          print("\nResults saved successfully.")
+          PY
+
+      - name: Upload Aggregate JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aggregate-speedtest-results
+          path: aggregate-results.json
+          if-no-files-found: warn
+          retention-days: 7
