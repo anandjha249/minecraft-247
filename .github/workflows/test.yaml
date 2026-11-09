@@ -1,4 +1,3 @@
-```yaml
 name: Cloud Provider IMDS Check
 
 on:
@@ -118,4 +117,3 @@ jobs:
 
           chmod +x test_imds.sh
           ./test_imds.sh
-```
