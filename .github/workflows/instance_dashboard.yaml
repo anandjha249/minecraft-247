@@ -1,0 +1,289 @@
+
+name: Cloud Instance Metadata Dashboard
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  instance-dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl python3 openssl
+
+      - name: Generate metadata dashboard
+        shell: bash
+        run: |
+          cat > server.py <<'PY'
+          import json
+          import os
+          import html
+          import urllib.request
+          import urllib.error
+          import subprocess
+          import hmac
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          from urllib.parse import urlparse, parse_qs
+
+          TOKEN = os.environ["PAGE_TOKEN"]
+
+          def request(url, headers=None, method="GET", data=None):
+              req = urllib.request.Request(
+                  url, headers=headers or {}, method=method, data=data
+              )
+              with urllib.request.urlopen(req, timeout=3) as response:
+                  return response.read().decode()
+
+          def get_private_ip():
+              try:
+                  return subprocess.check_output(
+                      ["bash", "-c",
+                       "ip -4 route get 1.1.1.1 | sed -n 's/.* src \\([^ ]*\\).*/\\1/p'"],
+                      text=True
+                  ).strip() or "Unavailable"
+              except Exception:
+                  return "Unavailable"
+
+          def get_metadata():
+              result = {
+                  "Provider": "Unknown",
+                  "Private IP": get_private_ip(),
+                  "Instance Metadata": {}
+              }
+
+              # Azure IMDS
+              try:
+                  data = json.loads(request(
+                      "http://169.254.169.254/metadata/instance"
+                      "?api-version=2021-02-01&format=json",
+                      {"Metadata": "true"}
+                  ))
+
+                  compute = data.get("compute", {})
+                  network = data.get("network", {})
+
+                  result["Provider"] = "Microsoft Azure"
+                  result["Instance Metadata"] = {
+                      "VM Name": compute.get("name"),
+                      "VM ID": compute.get("vmId"),
+                      "Location": compute.get("location"),
+                      "Resource Group": compute.get("resourceGroupName"),
+                      "VM Size": compute.get("vmSize"),
+                      "Availability Zone": compute.get("zone"),
+                      "Image Reference": compute.get("imageReference"),
+                      "Network": network
+                  }
+                  return result
+              except Exception:
+                  pass
+
+              # AWS IMDSv2
+              try:
+                  token = request(
+                      "http://169.254.169.254/latest/api/token",
+                      {"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+                      method="PUT"
+                  )
+
+                  headers = {"X-aws-ec2-metadata-token": token}
+                  base = "http://169.254.169.254/latest/meta-data/"
+
+                  paths = {
+                      "Instance ID": "instance-id",
+                      "Instance Type": "instance-type",
+                      "Private IP": "local-ipv4",
+                      "Availability Zone": "placement/availability-zone",
+                      "Region": "placement/region",
+                      "AMI ID": "ami-id"
+                  }
+
+                  metadata = {}
+                  for label, path in paths.items():
+                      try:
+                          metadata[label] = request(base + path, headers)
+                      except Exception:
+                          metadata[label] = "Unavailable"
+
+                  result["Provider"] = "Amazon AWS"
+                  result["Instance Metadata"] = metadata
+                  return result
+              except Exception:
+                  pass
+
+              result["Instance Metadata"] = {
+                  "Status": "Azure/AWS IMDS unavailable",
+                  "Note": "This runner may not expose cloud instance metadata."
+              }
+              return result
+
+          DATA = get_metadata()
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  query = parse_qs(urlparse(self.path).query)
+                  supplied = query.get("key", [""])[0]
+
+                  if not hmac.compare_digest(supplied, TOKEN):
+                      self.send_error(403, "Access denied")
+                      return
+
+                  metadata = html.escape(json.dumps(DATA, indent=2))
+                  page = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <title>Cloud Instance Dashboard</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta http-equiv="refresh" content="30">
+            <style>
+              body {{
+                background:#101827;color:#e5e7eb;
+                font-family:Arial,sans-serif;
+                margin:0;padding:30px;
+              }}
+              .container {{max-width:950px;margin:auto}}
+              .card {{
+                background:#1e293b;padding:24px;
+                border-radius:12px;margin-top:20px;
+                border:1px solid #334155;
+              }}
+              pre {{
+                white-space:pre-wrap;overflow-wrap:anywhere;
+                font-size:14px;line-height:1.7;
+              }}
+              h1 {{color:#38bdf8}}
+              .status {{color:#4ade80}}
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Cloud Instance Dashboard</h1>
+              <p class="status">● Server running</p>
+              <div class="card">
+                <h2>Provider: {html.escape(DATA["Provider"])}</h2>
+                <h3>Private IPv4</h3>
+                <pre>{html.escape(DATA["Private IP"])}</pre>
+              </div>
+              <div class="card">
+                <h2>Instance Metadata</h2>
+                <pre>{metadata}</pre>
+              </div>
+              <p>Auto-refresh: 30 seconds</p>
+            </div>
+          </body>
+          </html>"""
+
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/html; charset=utf-8")
+                  self.send_header("Cache-Control", "no-store")
+                  self.end_headers()
+                  self.wfile.write(page.encode())
+
+              def log_message(self, *args):
+                  pass
+
+          print("Dashboard metadata:", json.dumps(DATA), flush=True)
+          print("Starting HTTP server on port 3000", flush=True)
+          HTTPServer(("0.0.0.0", 3000), Handler).serve_forever()
+          PY
+
+          echo "PAGE_TOKEN=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+
+      - name: Start web server
+        run: |
+          python3 server.py > server.log 2>&1 &
+          echo $! > server.pid
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+            cat server.log
+            exit 1
+          fi
+
+          echo "Web server started on port 3000"
+
+      - name: Install Cloudflare Tunnel
+        run: |
+          sudo curl -fsSL \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+
+          sudo chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          cloudflared tunnel \
+            --url http://127.0.0.1:3000 \
+            --no-autoupdate \
+            --logfile cloudflared.log \
+            > /dev/null 2>&1 &
+
+          echo $! > tunnel.pid
+
+          echo "Waiting for Cloudflare tunnel..."
+
+          for i in $(seq 1 60); do
+            URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              cloudflared.log | head -n 1 || true)
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "${URL:-}" ]; then
+            echo "Tunnel failed to start."
+            cat cloudflared.log
+            exit 1
+          fi
+
+          FULL_URL="${URL}/?key=${PAGE_TOKEN}"
+
+          echo "=========================================="
+          echo "CLOUDFLARE QUICK TUNNEL IS READY"
+          echo "Dashboard: $FULL_URL"
+          echo "Local Port: 3000"
+          echo "=========================================="
+
+          {
+            echo "## Cloud Instance Dashboard"
+            echo ""
+            echo "- **Provider:** Azure / AWS / Unknown"
+            echo "- **Local Port:** 3000"
+            echo "- **Tunnel URL:** $FULL_URL"
+            echo "- **Lifetime:** 15 minutes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep dashboard alive for 15 minutes
+        run: |
+          echo "Dashboard will remain available for 15 minutes."
+          sleep 900
+
+      - name: Stop services
+        if: always()
+        run: |
+          if [ -f tunnel.pid ]; then
+            kill "$(cat tunnel.pid)" 2>/dev/null || true
+          fi
+
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
+
+          echo "Dashboard and tunnel stopped."
