@@ -1,0 +1,132 @@
+
+name: Zero-Secret Tailscale SSH Matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ssh-debug:
+    name: Tailscale VM ${{ matrix.runner_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        runner_id: [1, 2, 3, 4]
+
+    env:
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+
+    steps:
+      - name: Validate Secrets
+        run: |
+          set -euo pipefail
+
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "::error::TS_AUTHKEY secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$SSH_PASSWORD" ]; then
+            echo "::error::SSH_PASSWORD secret is missing."
+            exit 1
+          fi
+
+      - name: Setup SSH Server
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+          id runner
+
+          echo "::add-mask::$SSH_PASSWORD"
+          echo "runner:$SSH_PASSWORD" | sudo chpasswd
+
+          sudo mkdir -p /etc/ssh/sshd_config.d
+
+          sudo tee /etc/ssh/sshd_config.d/00-github-runner.conf > /dev/null <<EOF
+          PasswordAuthentication yes
+          KbdInteractiveAuthentication no
+          PermitRootLogin no
+          EOF
+
+          sudo sshd -t
+          sudo systemctl enable --now ssh
+          sudo systemctl restart ssh
+
+          echo "SSH server ready."
+
+      - name: Install Tailscale
+        run: |
+          set -euo pipefail
+
+          curl -fsSL https://tailscale.com/install.sh \
+            -o install-tailscale.sh
+
+          sudo bash install-tailscale.sh
+
+          echo "Tailscale installed."
+
+      - name: Authenticate and Join Tailnet
+        run: |
+          set -euo pipefail
+
+          RUNNER_ID=$(printf "%02d" "${{ matrix.runner_id }}")
+          HOSTNAME="gh-ssh-${RUNNER_ID}"
+
+          echo "========================================"
+          echo "Joining Tailscale"
+          echo "Hostname: $HOSTNAME"
+          echo "========================================"
+
+          sudo tailscale up \
+            --auth-key="$TS_AUTHKEY" \
+            --hostname="$HOSTNAME" \
+            --accept-routes=false
+
+          TAILSCALE_IP=$(sudo tailscale ip -4 | head -n 1)
+
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "::error::Failed to obtain Tailscale IP."
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "VM CONNECTED"
+          echo "========================================"
+          echo "Hostname: $HOSTNAME"
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "SSH Username: runner"
+          echo "SSH Command: ssh runner@$TAILSCALE_IP"
+          echo "========================================"
+
+          echo "RUNNER_HOSTNAME=$HOSTNAME" >> "$GITHUB_ENV"
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> "$GITHUB_ENV"
+
+      - name: Keep SSH Session Alive
+        run: |
+          echo "VM: $RUNNER_HOSTNAME"
+          echo "IP: $TAILSCALE_IP"
+          echo "SSH: ssh runner@$TAILSCALE_IP"
+
+          echo "Session duration: 30 minutes."
+
+          sleep 1800
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up ${{ matrix.runner_id }}"
+
+          sudo tailscale down || true
+          sudo systemctl stop ssh || true
+
+          echo "Runner disconnected."
