@@ -1,4 +1,4 @@
-name: Flezen - Upload random 20 MiB file
+name: Flezen - Upload random 19 MiB file
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       filename:
         description: "File name sent to Flezen"
         required: true
-        default: "random-20mb.bin"
+        default: "random-19mb.bin"
         type: string
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
     env:
       FLEZEN_COOKIE: ${{ inputs.cookie }}
       FILE_NAME: ${{ inputs.filename }}
-      FILE_SIZE: "20971520"
+      FILE_SIZE: "19922944"
 
     steps:
       - name: Generate, initiate, and upload
@@ -45,11 +45,11 @@ jobs:
           fi
 
           work_dir="$(mktemp -d)"
-          random_file="$work_dir/random-20mb.bin"
+          random_file="$work_dir/random-19mb.bin"
           initiate_response="$work_dir/initiate.json"
           trap 'rm -rf -- "$work_dir"' EXIT
 
-          dd if=/dev/urandom of="$random_file" bs=1M count=20 status=none
+          dd if=/dev/urandom of="$random_file" bs=1M count=19 status=none
           actual_size="$(stat --format='%s' "$random_file")"
 
           if [[ "$actual_size" != "$FILE_SIZE" ]]; then
@@ -109,15 +109,15 @@ jobs:
           signed_id_count="$(jq '.signedIDs | length' "$initiate_response")"
           expected_part_count="$(( (FILE_SIZE + part_size - 1) / part_size ))"
 
-          if [[ "$signed_id_count" -ne "$expected_part_count" ]]; then
-            echo "Server supplied $signed_id_count signed IDs; expected $expected_part_count." >&2
+          if [[ "$signed_id_count" -lt "$expected_part_count" ]]; then
+            echo "Server supplied $signed_id_count signed IDs; expected at least $expected_part_count." >&2
             exit 1
           fi
 
-          echo "Initiated $FILE_NAME ($FILE_SIZE bytes) as $signed_id_count part(s)."
+          echo "Initiated $FILE_NAME ($FILE_SIZE bytes) as $expected_part_count part(s); server returned $signed_id_count signed ID(s)."
 
           parts='[]'
-          for ((index = 0; index < signed_id_count; index++)); do
+          for ((index = 0; index < expected_part_count; index++)); do
             part_number="$((index + 1))"
             chunk_file="$work_dir/part-$part_number.bin"
             upload_response="$work_dir/part-$part_number.json"
@@ -163,7 +163,7 @@ jobs:
               --arg id "$part_id" \
               '$parts + [{number: $number, id: $id}]')"
 
-            echo "Uploaded part $part_number of $signed_id_count."
+            echo "Uploaded part $part_number of $expected_part_count."
           done
 
           echo "Upload finished. The completion endpoint was not called."
