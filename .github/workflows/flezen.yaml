@@ -1,0 +1,107 @@
+name: Flezen - Initiate upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      cookie:
+        description: "Full Flezen Cookie header value (fz=...; rt=...)"
+        required: true
+        type: string
+      filename:
+        description: "File name sent to Flezen"
+        required: true
+        type: string
+      filesize:
+        description: "File size in bytes"
+        required: true
+        type: string
+      parent_id:
+        description: "Destination folder ID"
+        required: true
+        default: "/"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  initiate:
+    name: Request upload credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      FLEZEN_COOKIE: ${{ inputs.cookie }}
+      FILE_NAME: ${{ inputs.filename }}
+      FILE_SIZE: ${{ inputs.filesize }}
+      PARENT_ID: ${{ inputs.parent_id }}
+
+    steps:
+      - name: Initiate upload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Prevent the cookie value from appearing in subsequent runner logs.
+          echo "::add-mask::$FLEZEN_COOKIE"
+
+          if [[ -z "$FLEZEN_COOKIE" ]]; then
+            echo "Cookie is required." >&2
+            exit 1
+          fi
+
+          if [[ -z "$FILE_NAME" ]]; then
+            echo "Filename is required." >&2
+            exit 1
+          fi
+
+          if [[ ! "$FILE_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Filesize must be a positive integer in bytes." >&2
+            exit 1
+          fi
+
+          request_body="$(jq -cn \
+            --arg name "$FILE_NAME" \
+            --argjson size "$FILE_SIZE" \
+            --arg parent_id "$PARENT_ID" \
+            '{name: $name, size: $size, parent_id: $parent_id}')"
+
+          response_file="$(mktemp)"
+          http_status="$(curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --request POST \
+            --url "https://flezen.com/user/upload/initiate" \
+            --header "accept: */*" \
+            --header "accept-language: en-GB,en-US;q=0.9,en;q=0.8,hi;q=0.7,or;q=0.6,hy;q=0.5" \
+            --header "content-type: application/json" \
+            --header "dnt: 1" \
+            --header "origin: https://flezen.com" \
+            --header "priority: u=1, i" \
+            --header "referer: https://flezen.com/user/upload" \
+            --header 'sec-ch-ua: "Not-A.Brand";v="99", "Google Chrome";v="157", "Chromium";v="157"' \
+            --header "sec-ch-ua-mobile: ?0" \
+            --header 'sec-ch-ua-platform: "Windows"' \
+            --header "sec-fetch-dest: empty" \
+            --header "sec-fetch-mode: cors" \
+            --header "sec-fetch-site: same-origin" \
+            --header "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36" \
+            --cookie "$FLEZEN_COOKIE" \
+            --data-raw "$request_body" \
+            --output "$response_file" \
+            --write-out "%{http_code}")"
+
+          echo "HTTP status: $http_status"
+
+          if jq empty "$response_file" >/dev/null 2>&1; then
+            jq . "$response_file"
+          else
+            cat "$response_file"
+            echo
+          fi
+
+          if [[ ! "$http_status" =~ ^2 ]]; then
+            echo "Flezen initiation request failed with HTTP $http_status." >&2
+            exit 1
+          fi
