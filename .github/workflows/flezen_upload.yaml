@@ -1,4 +1,4 @@
-name: Flezen - Upload random 20 MiB file
+name: Flezen - Upload random 19 MiB file
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       filename:
         description: "File name sent to Flezen"
         required: true
-        default: "random-20mb.bin"
+        default: "random-19mb.bin"
         type: string
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
     env:
       FLEZEN_COOKIE: ${{ inputs.cookie }}
       FILE_NAME: ${{ inputs.filename }}
-      FILE_SIZE: "20971520"
+      FILE_SIZE: "19922944"
 
     steps:
       - name: Generate, initiate, and upload
@@ -45,11 +45,11 @@ jobs:
           fi
 
           work_dir="$(mktemp -d)"
-          random_file="$work_dir/random-20mb.bin"
+          random_file="$work_dir/random-19mb.bin"
           initiate_response="$work_dir/initiate.json"
           trap 'rm -rf -- "$work_dir"' EXIT
 
-          dd if=/dev/urandom of="$random_file" bs=1M count=20 status=none
+          dd if=/dev/urandom of="$random_file" bs=1M count=19 status=none
           actual_size="$(stat --format='%s' "$random_file")"
 
           if [[ "$actual_size" != "$FILE_SIZE" ]]; then
