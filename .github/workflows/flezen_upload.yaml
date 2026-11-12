@@ -1,0 +1,174 @@
+name: Flezen - Upload random 20 MiB file
+
+on:
+  workflow_dispatch:
+    inputs:
+      cookie:
+        description: "Full Flezen Cookie header value (fz=...; rt=...)"
+        required: true
+        type: string
+      filename:
+        description: "File name sent to Flezen"
+        required: true
+        default: "random-20mb.bin"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  initiate-and-upload:
+    name: Initiate and upload random file
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLEZEN_COOKIE: ${{ inputs.cookie }}
+      FILE_NAME: ${{ inputs.filename }}
+      FILE_SIZE: "20971520"
+
+    steps:
+      - name: Generate, initiate, and upload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "::add-mask::$FLEZEN_COOKIE"
+
+          if [[ -z "$FLEZEN_COOKIE" ]]; then
+            echo "Cookie is required." >&2
+            exit 1
+          fi
+
+          if [[ -z "$FILE_NAME" ]]; then
+            echo "Filename is required." >&2
+            exit 1
+          fi
+
+          work_dir="$(mktemp -d)"
+          random_file="$work_dir/random-20mb.bin"
+          initiate_response="$work_dir/initiate.json"
+          trap 'rm -rf -- "$work_dir"' EXIT
+
+          dd if=/dev/urandom of="$random_file" bs=1M count=20 status=none
+          actual_size="$(stat --format='%s' "$random_file")"
+
+          if [[ "$actual_size" != "$FILE_SIZE" ]]; then
+            echo "Generated file has an unexpected size: $actual_size bytes." >&2
+            exit 1
+          fi
+
+          request_body="$(jq -cn \
+            --arg name "$FILE_NAME" \
+            --argjson size "$FILE_SIZE" \
+            '{name: $name, size: $size, parent_id: "/"}')"
+
+          initiate_status="$(curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --request POST \
+            --url "https://flezen.com/user/upload/initiate" \
+            --header "accept: */*" \
+            --header "accept-language: en-GB,en-US;q=0.9,en;q=0.8" \
+            --header "content-type: application/json" \
+            --header "dnt: 1" \
+            --header "origin: https://flezen.com" \
+            --header "referer: https://flezen.com/user/upload" \
+            --header "sec-fetch-dest: empty" \
+            --header "sec-fetch-mode: cors" \
+            --header "sec-fetch-site: same-origin" \
+            --header "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36" \
+            --cookie "$FLEZEN_COOKIE" \
+            --data-raw "$request_body" \
+            --output "$initiate_response" \
+            --write-out "%{http_code}")"
+
+          if [[ ! "$initiate_status" =~ ^2 ]]; then
+            echo "Initiation failed with HTTP $initiate_status." >&2
+            if jq empty "$initiate_response" >/dev/null 2>&1; then
+              jq . "$initiate_response"
+            else
+              cat "$initiate_response"
+              echo
+            fi
+            exit 1
+          fi
+
+          if ! jq -e '
+            (.serverUrl | type == "string" and length > 0) and
+            (.partSize | type == "number" and . > 0) and
+            (.signedIDs | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+          ' "$initiate_response" >/dev/null; then
+            echo "Initiation response is missing serverUrl, partSize, or signedIDs." >&2
+            exit 1
+          fi
+
+          server_url="$(jq -r '.serverUrl' "$initiate_response")"
+          part_size="$(jq -r '.partSize' "$initiate_response")"
+          signed_id_count="$(jq '.signedIDs | length' "$initiate_response")"
+          expected_part_count="$(( (FILE_SIZE + part_size - 1) / part_size ))"
+
+          if [[ "$signed_id_count" -ne "$expected_part_count" ]]; then
+            echo "Server supplied $signed_id_count signed IDs; expected $expected_part_count." >&2
+            exit 1
+          fi
+
+          echo "Initiated $FILE_NAME ($FILE_SIZE bytes) as $signed_id_count part(s)."
+
+          parts='[]'
+          for ((index = 0; index < signed_id_count; index++)); do
+            part_number="$((index + 1))"
+            chunk_file="$work_dir/part-$part_number.bin"
+            upload_response="$work_dir/part-$part_number.json"
+            signed_id="$(jq -r --argjson index "$index" '.signedIDs[$index]' "$initiate_response")"
+            encoded_signed_id="$(jq -rn --arg value "$signed_id" '$value | @uri')"
+            upload_url="${server_url%/}/?x=$encoded_signed_id"
+
+            dd \
+              if="$random_file" \
+              of="$chunk_file" \
+              bs="$part_size" \
+              skip="$index" \
+              count=1 \
+              status=none
+
+            upload_status="$(curl \
+              --silent \
+              --show-error \
+              --connect-timeout 10 \
+              --max-time 300 \
+              --request PUT \
+              --url "$upload_url" \
+              --header "accept: */*" \
+              --header "content-type: application/octet-stream" \
+              --upload-file "$chunk_file" \
+              --output "$upload_response" \
+              --write-out "%{http_code}")"
+
+            if [[ ! "$upload_status" =~ ^2 ]]; then
+              echo "Part $part_number upload failed with HTTP $upload_status." >&2
+              exit 1
+            fi
+
+            if ! jq -e '.jId | type == "string" and length > 0' "$upload_response" >/dev/null; then
+              echo "Part $part_number response did not contain a jId." >&2
+              exit 1
+            fi
+
+            part_id="$(jq -r '.jId' "$upload_response")"
+            parts="$(jq -cn \
+              --argjson parts "$parts" \
+              --argjson number "$part_number" \
+              --arg id "$part_id" \
+              '$parts + [{number: $number, id: $id}]')"
+
+            echo "Uploaded part $part_number of $signed_id_count."
+          done
+
+          echo "Upload finished. The completion endpoint was not called."
+          jq -n \
+            --arg filename "$FILE_NAME" \
+            --argjson size "$FILE_SIZE" \
+            --argjson parts "$parts" \
+            '{filename: $filename, size: $size, parts: $parts}'
