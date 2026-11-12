@@ -109,15 +109,15 @@ jobs:
           signed_id_count="$(jq '.signedIDs | length' "$initiate_response")"
           expected_part_count="$(( (FILE_SIZE + part_size - 1) / part_size ))"
 
-          if [[ "$signed_id_count" -ne "$expected_part_count" ]]; then
-            echo "Server supplied $signed_id_count signed IDs; expected $expected_part_count." >&2
+          if [[ "$signed_id_count" -lt "$expected_part_count" ]]; then
+            echo "Server supplied $signed_id_count signed IDs; expected at least $expected_part_count." >&2
             exit 1
           fi
 
-          echo "Initiated $FILE_NAME ($FILE_SIZE bytes) as $signed_id_count part(s)."
+          echo "Initiated $FILE_NAME ($FILE_SIZE bytes) as $expected_part_count part(s); server returned $signed_id_count signed ID(s)."
 
           parts='[]'
-          for ((index = 0; index < signed_id_count; index++)); do
+          for ((index = 0; index < expected_part_count; index++)); do
             part_number="$((index + 1))"
             chunk_file="$work_dir/part-$part_number.bin"
             upload_response="$work_dir/part-$part_number.json"
@@ -163,7 +163,7 @@ jobs:
               --arg id "$part_id" \
               '$parts + [{number: $number, id: $id}]')"
 
-            echo "Uploaded part $part_number of $signed_id_count."
+            echo "Uploaded part $part_number of $expected_part_count."
           done
 
           echo "Upload finished. The completion endpoint was not called."
