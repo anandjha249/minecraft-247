@@ -26,9 +26,14 @@ permissions:
 
 jobs:
   initiate:
-    name: Request upload credentials
+    name: Request upload credentials (${{ matrix.worker }})
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        worker: [1, 2, 3, 4]
     env:
       FLEZEN_COOKIE: ${{ inputs.cookie }}
       FILE_NAME: ${{ inputs.filename }}
