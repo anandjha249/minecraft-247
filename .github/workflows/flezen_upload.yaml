@@ -47,6 +47,7 @@ jobs:
           work_dir="$(mktemp -d)"
           random_file="$work_dir/random-19mb.bin"
           initiate_response="$work_dir/initiate.json"
+          completion_response="$work_dir/complete.json"
           trap 'rm -rf -- "$work_dir"' EXIT
 
           dd if=/dev/urandom of="$random_file" bs=1M count=19 status=none
@@ -98,14 +99,16 @@ jobs:
           if ! jq -e '
             (.serverUrl | type == "string" and length > 0) and
             (.partSize | type == "number" and . > 0) and
-            (.signedIDs | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+            (.signedIDs | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
+            (.signature_id | type == "string" and length > 0)
           ' "$initiate_response" >/dev/null; then
-            echo "Initiation response is missing serverUrl, partSize, or signedIDs." >&2
+            echo "Initiation response is missing serverUrl, partSize, signedIDs, or signature_id." >&2
             exit 1
           fi
 
           server_url="$(jq -r '.serverUrl' "$initiate_response")"
           part_size="$(jq -r '.partSize' "$initiate_response")"
+          signature_id="$(jq -r '.signature_id' "$initiate_response")"
           signed_id_count="$(jq '.signedIDs | length' "$initiate_response")"
           expected_part_count="$(( (FILE_SIZE + part_size - 1) / part_size ))"
 
@@ -166,9 +169,49 @@ jobs:
             echo "Uploaded part $part_number of $expected_part_count."
           done
 
-          echo "Upload finished. The completion endpoint was not called."
-          jq -n \
-            --arg filename "$FILE_NAME" \
-            --argjson size "$FILE_SIZE" \
+          completion_body="$(jq -cn \
+            --arg signature_id "$signature_id" \
             --argjson parts "$parts" \
-            '{filename: $filename, size: $size, parts: $parts}'
+            '{signature_id: $signature_id, parts: $parts}')"
+
+          completion_status="$(curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --request POST \
+            --url "https://flezen.com/user/upload/complete" \
+            --header "accept: */*" \
+            --header "content-type: application/json" \
+            --header "origin: https://flezen.com" \
+            --header "referer: https://flezen.com/user/upload" \
+            --header "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36" \
+            --cookie "$FLEZEN_COOKIE" \
+            --data-raw "$completion_body" \
+            --output "$completion_response" \
+            --write-out "%{http_code}")"
+
+          if [[ ! "$completion_status" =~ ^2 ]]; then
+            echo "Completion failed with HTTP $completion_status." >&2
+            if jq empty "$completion_response" >/dev/null 2>&1; then
+              jq . "$completion_response"
+            else
+              cat "$completion_response"
+              echo
+            fi
+            exit 1
+          fi
+
+          if ! jq -e '
+            (.sucess == true) and
+            (.slug | type == "string" and length > 0) and
+            (.name | type == "string" and length > 0) and
+            (.size | type == "number" and . >= 0)
+          ' "$completion_response" >/dev/null; then
+            echo "Completion response did not contain the expected file metadata." >&2
+            jq . "$completion_response"
+            exit 1
+          fi
+
+          echo "Upload completed successfully."
+          jq . "$completion_response"
