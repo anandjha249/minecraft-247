@@ -7,7 +7,7 @@ on:
 jobs:
   ssh-debug:
     runs-on: ubuntu-26.04
-    timeout-minutes: 40
+    timeout-minutes: 400
 
     steps:
       - name: Setup SSH Server and User
