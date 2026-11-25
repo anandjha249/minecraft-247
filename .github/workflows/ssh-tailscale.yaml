@@ -6,7 +6,7 @@ on:
 
 jobs:
   ssh-debug:
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
 
     steps:
