@@ -94,7 +94,7 @@ jobs:
           echo "Session active for 30 minutes."
           echo "Keep this workflow running while connected."
 
-          sleep 1800
+          sleep 21000
 
       - name: Cleanup
         if: always()
